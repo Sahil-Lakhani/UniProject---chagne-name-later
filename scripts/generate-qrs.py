@@ -17,13 +17,14 @@ import hmac
 import hashlib
 import os
 
+from dotenv import load_dotenv
 import qrcode
 from PIL import Image, ImageDraw, ImageFont
 
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
-#change it later coz its hardcoded and use the uni one 
-SECRET = "c1609776f2ef33807d974013fc06754c79972411f0de86cad1886ab8d825b133"
-SPREADSHEET_ID = "1feNGZOlKBdtETu5AlkKzXYtivHcnG-K1oeVnl9xwpi8"
+SECRET = os.environ['QR_SECRET']
+SPREADSHEET_ID = os.environ['SPREADSHEET_ID']
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "output")
 
 ATTENDEES = [
