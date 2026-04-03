@@ -1,3 +1,5 @@
 qrcode[pil]
 pillow
 python-dotenv
+gspread
+google-auth

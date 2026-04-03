@@ -1,62 +1,94 @@
 """
-generate-qrs.py does this One-time local script to generate QR code PNGs for attendees.
+generate-qrs.py — Generates QR code PNGs for every attendee in the Google Sheet.
 
 Usage:
     pip install -r requirements.txt
     python generate-qrs.py
 
-Output:  ../output/{row}_{name}.png
-Each PNG contains the signed token QR code with the attendee's name printed below.
+Authentication:
+    Requires a Google service account JSON key file.
+    Set SERVICE_ACCOUNT_FILE in .env (path to the JSON key), OR place it at
+    scripts/service_account.json next to this file.
 
+    The service account must have at least Viewer access to the spreadsheet
+    (share the sheet with the service account email).
+
+Output: ../output/{row}_{name}.png
 Token format: "ROW:{row}:{HMAC-SHA256(str(row), SECRET)}"
-and also were making this hard codded for my row so later add the files sheet
-This must match the format in src/lib/qr.js exactly.
 """
 
 import hmac
 import hashlib
 import os
+import sys
 
 from dotenv import load_dotenv
+import gspread
+from google.oauth2.service_account import Credentials
 import qrcode
 from PIL import Image, ImageDraw, ImageFont
 
+# ── Config ────────────────────────────────────────────────────────────────────
+
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
-SECRET = os.environ['QR_SECRET']
+SECRET         = os.environ['QR_SECRET']
 SPREADSHEET_ID = os.environ['SPREADSHEET_ID']
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "output")
+SHEET_NAME     = os.environ.get('SHEET_NAME', 'testSheet')
 
-ATTENDEES = [
-    {"row": 17, "name": "Mohammed Sahil Lakhani"},
-    # Add more attendees 
-    # {"row": 18, "name": "Jane Doe"},
-    # {"row": 19, "name": "John Smith"},
-]
+# Path to the service account JSON — check .env first, then default location
+_default_sa = os.path.join(os.path.dirname(__file__), 'service_account.json')
+SERVICE_ACCOUNT_FILE = os.environ.get('SERVICE_ACCOUNT_FILE', _default_sa)
+
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '..', 'output')
+
+# Column C (0-based index 2) holds the attendee name — must match Code.gs
+NAME_COL_INDEX = 2   # column C
+
+# ── Sheets helpers ────────────────────────────────────────────────────────────
+
+def fetch_attendees() -> list[dict]:
+    """
+    Reads the Google Sheet and returns a list of {row, name} dicts.
+    Row numbers are 1-based (matching the sheet), starting at 2 (row 1 = header).
+    Rows with an empty name column are skipped.
+    """
+    if not os.path.exists(SERVICE_ACCOUNT_FILE):
+        print(f"ERROR: Service account file not found at: {SERVICE_ACCOUNT_FILE}")
+        print("  → Create a service account at console.cloud.google.com")
+        print("  → Download the JSON key and set SERVICE_ACCOUNT_FILE in .env")
+        sys.exit(1)
+
+    scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+    creds  = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+    client = gspread.authorize(creds)
+
+    sheet      = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+    all_values = sheet.get_all_values()   # list of rows (each row is a list of strings)
+
+    attendees = []
+    for i, row in enumerate(all_values[1:], start=2):  # skip header, row index starts at 2
+        name = row[NAME_COL_INDEX].strip() if len(row) > NAME_COL_INDEX else ''
+        if not name:
+            continue
+        attendees.append({'row': i, 'name': name})
+
+    return attendees
+
+# ── QR helpers ────────────────────────────────────────────────────────────────
 
 def generate_token(row: int) -> str:
-    """
-    Creates a signed token for the given row number.
-    Must match the format in src/lib/qr.js → generateToken().
-
-    Example (row 17):(here thats my row number in the sheet)
-        token = generate_token(17)
-        print(token)
-        # "ROW:17:a3c9f2..." (64-char hex HMAC suffix)
-    """
+    """Creates a signed token matching the format expected by Code.gs."""
     mac = hmac.new(SECRET.encode(), str(row).encode(), hashlib.sha256).hexdigest()
     return f"ROW:{row}:{mac}"
 
 
 def generate_qr_png(row: int, name: str, output_path: str) -> None:
-    """
-    generates a qr code PNG for the given attendee and saves it to output_path. name is printed as a text label below the QR code.
-    """
+    """Generates a QR code PNG with the attendee name printed below."""
     token = generate_token(row)
 
-    # Create QR code image
     qr = qrcode.QRCode(
-        version=None,          # auto-size
+        version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_M,
         box_size=10,
         border=4,
@@ -72,7 +104,6 @@ def generate_qr_png(row: int, name: str, output_path: str) -> None:
     canvas.paste(qr_img, (0, 0))
 
     draw = ImageDraw.Draw(canvas)
-
     try:
         font = ImageFont.truetype("arial.ttf", 18)
     except (IOError, OSError):
@@ -81,35 +112,42 @@ def generate_qr_png(row: int, name: str, output_path: str) -> None:
         except (IOError, OSError):
             font = ImageFont.load_default()
 
-    #NAME
-    bbox = draw.textbbox((0, 0), name, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_x = (qr_width - text_width) // 2
-    text_y = qr_height + (label_height - (bbox[3] - bbox[1])) // 2
+    bbox      = draw.textbbox((0, 0), name, font=font)
+    text_w    = bbox[2] - bbox[0]
+    text_x    = (qr_width - text_w) // 2
+    text_y    = qr_height + (label_height - (bbox[3] - bbox[1])) // 2
     draw.text((text_x, text_y), name, fill="black", font=font)
 
     canvas.save(output_path)
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def main():
+    print(f"Fetching attendees from sheet '{SHEET_NAME}'…")
+    attendees = fetch_attendees()
+
+    if not attendees:
+        print("No attendees found (all name cells in column C are empty).")
+        return
+
+    print(f"Found {len(attendees)} attendee(s). Generating QR codes…\n")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    for attendee in ATTENDEES:
-        row = attendee["row"]
-        name = attendee["name"]
+    for attendee in attendees:
+        row  = attendee['row']
+        name = attendee['name']
 
-        safe_name = name.replace(" ", "_").replace("/", "-")
-        filename = f"{row}_{safe_name}.png"
+        safe_name   = name.replace(" ", "_").replace("/", "-")
+        filename    = f"{row}_{safe_name}.png"
         output_path = os.path.join(OUTPUT_DIR, filename)
 
         generate_qr_png(row, name, output_path)
-        print(f"Generated QR for row {row} → {name}")
-        print(f"  Token : {generate_token(row)}")
-        print(f"  Saved : {output_path}")
+        print(f"  Row {row:>4} │ {name}")
+        print(f"           Token : {generate_token(row)}")
+        print(f"           Saved : {output_path}")
         print()
 
-    print(f"Done. {len(ATTENDEES)} QR code(s) written to {os.path.abspath(OUTPUT_DIR)}/")
-
-
+    print(f"Done. {len(attendees)} QR code(s) written to {os.path.abspath(OUTPUT_DIR)}/")
 
 
 if __name__ == "__main__":
