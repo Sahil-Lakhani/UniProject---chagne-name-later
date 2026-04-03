@@ -40,3 +40,10 @@ env/
 # Project specifics
 output/
 .claude/
+
+# Google service account key — never commit this
+service_account.json
+scripts/service_account.json
+
+# Internal design docs / superpowers plans
+docs/superpowers/
